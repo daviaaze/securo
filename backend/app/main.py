@@ -217,6 +217,8 @@ if os.getenv("AGENTS_ENABLED", "false").strip().lower() in ("1", "true", "yes", 
         from app.agents.api.agents import router as agents_router
         from app.agents.api.connections import router as agents_connections_router
         from app.agents.api.conversations import router as agents_conversations_router
+        from app.api.agent_proposals import router as agent_proposals_router
+
         from app.agents.api.chat import router as agents_chat_router
         from app.agents.api.knowledge import router as agents_knowledge_router
         from app.agents.api.mcp_tokens import router as agents_mcp_tokens_router
@@ -227,6 +229,7 @@ if os.getenv("AGENTS_ENABLED", "false").strip().lower() in ("1", "true", "yes", 
         app.include_router(agents_info_router)
         app.include_router(agents_connections_router)
         app.include_router(agents_conversations_router)
+        app.include_router(agent_proposals_router)
         app.include_router(agents_mcp_tokens_router)
         app.include_router(agents_router)
         app.include_router(agents_chat_router)

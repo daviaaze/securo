@@ -357,37 +357,6 @@ async def test_mcp_propose_create_rule_preserves_advanced_draft_without_writing(
     assert after == before
 
 
-@pytest.mark.asyncio
-async def test_mcp_external_apply_creates_rule_and_applies_it_to_history(
-    session, test_user, test_transactions, monkeypatch
-):
-    from sqlalchemy import select
-    from app.models.rule import Rule
-
-    netflix = next(tx for tx in test_transactions if tx.description == "NETFLIX")
-    applied = await _call_tool(
-        test_user.id,
-        monkeypatch,
-        "propose_create_rule",
-        {
-            "name": "Normalize Netflix",
-            "conditions": [
-                {"field": "description", "op": "equals", "value": "NETFLIX"}
-            ],
-            "actions": [{"op": "set_description", "value": "Netflix subscription"}],
-            "apply_to_existing": True,
-            "apply": True,
-        },
-        external=True,
-    )
-    assert applied["applied"] is True
-    assert applied["applied_count"] == 1
-    rule = (
-        await session.execute(select(Rule).where(Rule.id == uuid.UUID(applied["id"])))
-    ).scalar_one()
-    assert rule.actions == [{"op": "set_description", "value": "Netflix subscription"}]
-    await session.refresh(netflix)
-    assert netflix.description == "Netflix subscription"
 
 
 @pytest.mark.asyncio
@@ -417,30 +386,6 @@ async def test_mcp_propose_update_rule_previews_changes_without_writing(
 
 
 @pytest.mark.asyncio
-async def test_mcp_external_apply_updates_rule_and_matching_history(
-    session, test_user, test_rules, test_transactions, monkeypatch
-):
-    rule = test_rules[0]
-    uber = next(tx for tx in test_transactions if tx.description == "UBER TRIP")
-    applied = await _call_tool(
-        test_user.id,
-        monkeypatch,
-        "propose_update_rule",
-        {
-            "rule_id": str(rule.id),
-            "actions": [{"op": "set_description", "value": "Ride"}],
-            "apply_to_existing": True,
-            "apply": True,
-        },
-        external=True,
-    )
-    assert applied["applied"] is True
-    assert applied["applied_count"] == 1
-    await session.refresh(rule)
-    await session.refresh(uber)
-    assert rule.actions == [{"op": "set_description", "value": "Ride"}]
-    assert uber.description == "Ride"
-
 
 @pytest.mark.asyncio
 async def test_mcp_propose_delete_rule_identifies_target_without_deleting(
@@ -459,21 +404,56 @@ async def test_mcp_propose_delete_rule_identifies_target_without_deleting(
     assert proposal["target"]["id"] == str(rule.id)
     assert await session.get(Rule, rule.id) is not None
 
-
 @pytest.mark.asyncio
-async def test_mcp_external_apply_deletes_rule(
-    session, test_user, test_rules, monkeypatch
+async def test_mcp_preview_list_and_external_approval_share_persisted_proposal(
+    test_user, test_workspace, monkeypatch
 ):
-    from app.models.rule import Rule
+    from tests.conftest import TestSessionLocal
+    import mcp_server.main as mcp_main
 
-    rule_id = test_rules[0].id
-    applied = await _call_tool(
-        test_user.id,
-        monkeypatch,
-        "propose_delete_rule",
-        {"rule_id": str(rule_id), "apply": True},
-        external=True,
-    )
-    assert applied["applied"] is True
-    session.expire_all()
-    assert await session.get(Rule, rule_id) is None
+    monkeypatch.setattr(mcp_main, "async_session_maker", TestSessionLocal)
+    async with _client() as cli:
+        preview_response = await cli.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "propose_create_category", "arguments": {"name": "MCP approval smoke"}},
+            },
+            headers=_auth_headers(test_user.id),
+        )
+        preview = preview_response.json()["result"]["structuredContent"]
+        assert preview["status"] == "pending"
+        proposal_id = preview["proposal_id"]
+        expected_hash = preview["expected_hash"]
+
+        listed = await cli.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "get_proposal", "arguments": {"proposal_id": proposal_id}},
+            },
+            headers=_auth_headers(test_user.id),
+        )
+        assert listed.json()["result"]["structuredContent"]["proposal_id"] == proposal_id
+
+        internal_approval = await cli.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": {"name": "approve_proposal", "arguments": {"proposal_id": proposal_id, "expected_hash": expected_hash}},
+            },
+            headers=_auth_headers(test_user.id),
+        )
+        assert internal_approval.json()["error"]["code"] == -32601
+
+        external_approval = await cli.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                "params": {"name": "approve_proposal", "arguments": {"proposal_id": proposal_id, "expected_hash": expected_hash}},
+            },
+            headers=_external_auth_headers(test_user.id),
+        )
+        applied = external_approval.json()["result"]["structuredContent"]
+        assert applied["status"] == "applied"
+        assert applied["result"]["kind"] == "create_category"

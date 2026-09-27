@@ -1039,72 +1039,88 @@ async def create_rule(
     workspace_id: uuid.UUID,
     user_id: uuid.UUID,
     data: RuleCreate,
+    *,
+    commit: bool = True,
 ) -> Rule:
     existing_names = await _get_existing_rule_names_for_workspace(session, workspace_id)
     if data.name in existing_names:
         raise DuplicateRuleError(f"A rule named '{data.name}' already exists")
-
     await _validate_rule_definition(session, workspace_id, data.conditions, data.actions)
-
     rule = Rule(
-        user_id=user_id,
         workspace_id=workspace_id,
+        user_id=user_id,
         name=data.name,
         conditions_op=data.conditions_op,
-        conditions=[c.model_dump() for c in data.conditions],
-        actions=[a.model_dump() for a in data.actions],
+        conditions=[condition.model_dump() for condition in data.conditions],
+        actions=[action.model_dump() for action in data.actions],
         priority=data.priority,
         is_active=data.is_active,
     )
     session.add(rule)
-    await session.commit()
-    await session.refresh(rule)
+    if commit:
+        await session.commit()
+        await session.refresh(rule)
+    else:
+        await session.flush()
+    if data.is_active and data.apply_to_existing:
+        await apply_single_rule(
+            session,
+            workspace_id,
+            rule,
+            overwrite_existing_categories=data.overwrite_existing_categories,
+            commit=commit,
+        )
     return rule
 
 
 async def update_rule(
-    session: AsyncSession, rule_id: uuid.UUID, workspace_id: uuid.UUID, data: RuleUpdate
+    session: AsyncSession,
+    rule_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+    data: RuleUpdate,
+    *,
+    commit: bool = True,
 ) -> Optional[Rule]:
     rule = await get_rule(session, rule_id, workspace_id)
     if not rule:
         return None
-
-    update_data = data.model_dump(
-        exclude_unset=True,
-        exclude={"apply_to_existing", "overwrite_existing_categories"},
+    changes = data.model_dump(exclude_unset=True)
+    should_apply = (
+        data.apply_to_existing
+        if data.apply_to_existing is not None
+        else bool({"conditions", "conditions_op", "actions"}.intersection(changes))
     )
-
-    if "name" in update_data and update_data["name"] != rule.name:
-        existing_names = await _get_existing_rule_names_for_workspace(session, workspace_id)
-        if update_data["name"] in existing_names:
-            raise DuplicateRuleError(f"A rule named '{update_data['name']}' already exists")
-
-    if data.conditions is not None:
-        update_data["conditions"] = [c.model_dump() for c in data.conditions]
-    if data.actions is not None:
-        update_data["actions"] = [a.model_dump() for a in data.actions]
-
-    await _validate_rule_definition(
-        session,
-        workspace_id,
-        update_data.get("conditions", rule.conditions or []),
-        update_data.get("actions", rule.actions or []),
-    )
-
-    for key, value in update_data.items():
-        setattr(rule, key, value)
-
-    await session.commit()
-    await session.refresh(rule)
+    for key, value in changes.items():
+        if key not in ("apply_to_existing", "overwrite_existing_categories"):
+            setattr(rule, key, value)
+    await _validate_rule_definition(session, workspace_id, rule.conditions, rule.actions)
+    if commit:
+        await session.commit()
+        await session.refresh(rule)
+    else:
+        await session.flush()
+    if rule.is_active and should_apply:
+        await apply_single_rule(
+            session,
+            workspace_id,
+            rule,
+            overwrite_existing_categories=data.overwrite_existing_categories,
+            commit=commit,
+        )
     return rule
 
 
-async def delete_rule(session: AsyncSession, rule_id: uuid.UUID, workspace_id: uuid.UUID) -> bool:
+async def delete_rule(
+    session: AsyncSession, rule_id: uuid.UUID, workspace_id: uuid.UUID, *, commit: bool = True
+) -> bool:
     rule = await get_rule(session, rule_id, workspace_id)
     if not rule:
         return False
     await session.delete(rule)
-    await session.commit()
+    if commit:
+        await session.commit()
+    else:
+        await session.flush()
     return True
 
 
@@ -1377,6 +1393,8 @@ async def apply_single_rule(
     workspace_id: uuid.UUID,
     rule: Rule,
     overwrite_existing_categories: bool = False,
+    *,
+    commit: bool = True,
 ) -> int:
     """Apply one rule to existing workspace transactions and count modifications.
 
@@ -1444,7 +1462,10 @@ async def apply_single_rule(
         if before != after:
             count += 1
 
-    await session.commit()
+    if commit:
+        await session.commit()
+    else:
+        await session.flush()
     return count
 
 

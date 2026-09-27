@@ -210,6 +210,16 @@ _RUNTIME_GUARDRAIL = (
     "`description_contains` to `aggregate` rather than listing and "
     "summing. The only acceptable place to do arithmetic yourself is a "
     "single combine step on tool outputs (e.g. `1847 * 12` = 22164).\n"
+    "\n"
+    "8. For personal-finance questions about current or historical account "
+    "balances, transactions, income, expenses, budgets, or goals, query the "
+    "relevant Securo tool before stating numbers or trends. Auto-context and "
+    "conversation history are not live financial records. State the period "
+    "and currency when reporting amounts; distinguish totals from monthly "
+    "values and cash flow from asset balances. If the tools don't provide "
+    "enough evidence, say what is missing instead of estimating or inventing "
+    "a number. For planning questions, label assumptions and separate "
+    "calculations from recommendations.\n"
 )
 
 

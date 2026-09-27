@@ -241,17 +241,10 @@ export function ChatPanel({ agent, conversationId, onConversationCreated, focusS
         {draft && (
           <div className="space-y-2">
             {draft.tools.map((tool, i) => {
-              const isProposal = isProposalToolName(tool.name) && tool.result?.data && isProposalData(tool.result.data)
+              const proposalData = tool.result?.data
+              const isProposal = isProposalToolName(tool.name) && isProposalData(proposalData)
               if (isProposal) {
-                // Stable id for the localStorage "applied" marker — the
-                // draft uses an in-flight uuid so we suffix with the index.
-                return (
-                  <ProposalCard
-                    key={i}
-                    toolCallId={`draft-${draft.id}-${i}`}
-                    data={tool.result!.data as Record<string, unknown>}
-                  />
-                )
+                return <ProposalCard key={proposalData.proposal_id || `legacy-${draft.id}-${i}`} data={proposalData} />
               }
               return (
                 <ToolDebugChip
@@ -370,9 +363,8 @@ function HistoryView({ agent, history }: { agent: Agent; history: AgentMessage[]
                   const tres = resultsById[tc.id]
                   const data = tres?.tool_result?.data
                   if (isProposalToolName(tc.name) && data && isProposalData(data)) {
-                    // Persisted tool_call_id is stable across reloads —
-                    // perfect localStorage key for the "applied" marker.
-                    return <ProposalCard key={tc.id} toolCallId={tc.id} data={data as Record<string, unknown>} />
+                    // The persisted proposal ID remains stable across reopens; legacy cards stay read-only.
+                    return <ProposalCard key={data.proposal_id || tc.id} data={data as Record<string, unknown>} />
                   }
                   return (
                     <ToolDebugChip

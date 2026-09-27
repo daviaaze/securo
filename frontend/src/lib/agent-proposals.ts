@@ -13,6 +13,12 @@ export type ProposalKind =
   | 'create_goal'
 
 export interface ProposalData {
+  proposal_id?: string
+  expected_hash?: string
+  status?: 'pending' | 'applied' | 'rejected' | 'expired'
+  expires_at?: string
+  result?: Record<string, unknown> | null
+  preview?: Record<string, unknown>
   kind?: ProposalKind
   proposed?: Record<string, unknown>
   target?: Record<string, unknown>
@@ -22,7 +28,6 @@ export interface ProposalData {
   target_category?: { id: string; name: string }
   name_collision?: { id: string; name: string }
   mode?: 'deactivate' | 'delete'
-  apply_endpoint?: string
   error?: string
 }
 

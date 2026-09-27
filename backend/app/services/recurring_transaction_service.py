@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.app_clock import app_today, get_workspace_timezone, today_in
 from app.models.account import Account
 from app.models.bank_connection import BankConnection
+from app.models.category import Category
 from app.models.recurring_transaction import RecurringTransaction
 from app.models.transaction import Transaction
 from app.schemas.recurring_transaction import RecurringTransactionCreate, RecurringTransactionUpdate
@@ -62,19 +63,24 @@ async def create_recurring_transaction(
     workspace_id: uuid.UUID,
     user_id: uuid.UUID,
     data: RecurringTransactionCreate,
+    *,
+    commit: bool = True,
 ) -> RecurringTransaction:
     await _verify_account_in_workspace(session, workspace_id, data.account_id)
-    next_occ = data.start_date
-    if data.skip_first:
-        next_occ = _advance_date(
-            data.start_date, data.frequency,
-            intended_day=data.day_of_month or data.start_date.day,
+    if data.category_id is not None:
+        result = await session.execute(
+            select(Category.id).where(
+                Category.id == data.category_id, Category.workspace_id == workspace_id
+            )
         )
+        if result.scalar_one_or_none() is None:
+            raise ValueError("Category not found")
+    next_occurrence = data.start_date
+    if data.skip_first:
+        next_occurrence = _advance_date(data.start_date, data.frequency, data.day_of_month)
     recurring = RecurringTransaction(
-        user_id=user_id,
         workspace_id=workspace_id,
-        account_id=data.account_id,
-        category_id=data.category_id,
+        user_id=user_id,
         description=data.description,
         amount=data.amount,
         currency=data.currency,
@@ -84,73 +90,69 @@ async def create_recurring_transaction(
         day_of_month=data.day_of_month,
         start_date=data.start_date,
         end_date=data.end_date,
+        account_id=data.account_id,
+        category_id=data.category_id,
+        skip_first=data.skip_first,
         auto_generate=data.auto_generate,
-        next_occurrence=next_occ,
+        next_occurrence=next_occurrence,
     )
     session.add(recurring)
-    await session.flush()
-    await stamp_primary_amount(
-        session, user_id, recurring,
-        date_field="start_date",
-    )
-    await session.commit()
-    await session.refresh(recurring)
+    if commit:
+        await session.commit()
+        await session.refresh(recurring)
+    else:
+        await session.flush()
     return recurring
 
 
 async def update_recurring_transaction(
-    session: AsyncSession, recurring_id: uuid.UUID, workspace_id: uuid.UUID, data: RecurringTransactionUpdate
+    session: AsyncSession,
+    recurring_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+    data: RecurringTransactionUpdate,
+    *,
+    commit: bool = True,
 ) -> Optional[RecurringTransaction]:
     recurring = await get_recurring_transaction(session, recurring_id, workspace_id)
     if not recurring:
         return None
-
-    update_data = data.model_dump(exclude_unset=True)
-
-    for required in ("weekend_adjustment", "start_date", "frequency"):
-        if required in update_data and update_data[required] is None:
-            raise ValueError(f"{required} is required")
-
-    # A recurring transaction must always have an account — reject an explicit
-    # null, and verify ownership of any new account_id.
-    if "account_id" in update_data:
-        new_account_id = update_data["account_id"]
-        if new_account_id is None:
-            raise ValueError("account_id is required")
-        if new_account_id != recurring.account_id:
-            await _verify_account_in_workspace(session, workspace_id, new_account_id)
-
-    schedule_changed = any(
-        key in update_data and update_data[key] != getattr(recurring, key)
-        for key in _SCHEDULE_FIELDS
-    )
-    previous_next_occurrence = recurring.next_occurrence
-
-    for key, value in update_data.items():
+    changes = data.model_dump(exclude_unset=True)
+    if "account_id" in changes:
+        await _verify_account_in_workspace(session, workspace_id, changes["account_id"])
+    if changes.get("category_id") is not None:
+        result = await session.execute(
+            select(Category.id).where(
+                Category.id == changes["category_id"], Category.workspace_id == workspace_id
+            )
+        )
+        if result.scalar_one_or_none() is None:
+            raise ValueError("Category not found")
+    schedule_changed = any(field in changes for field in _SCHEDULE_FIELDS)
+    for key, value in changes.items():
         setattr(recurring, key, value)
-
     if schedule_changed:
         recurring.next_occurrence = _first_occurrence_on_or_after(
-            recurring.start_date,
-            recurring.frequency,
-            intended_day=recurring.day_of_month or recurring.start_date.day,
-            floor=previous_next_occurrence,
+            recurring.start_date, recurring.frequency, recurring.day_of_month, date.today()
         )
-
-    await session.commit()
-    await session.refresh(recurring)
+    if commit:
+        await session.commit()
+        await session.refresh(recurring)
+    else:
+        await session.flush()
     return recurring
 
 
 async def delete_recurring_transaction(
-    session: AsyncSession, recurring_id: uuid.UUID, workspace_id: uuid.UUID
+    session: AsyncSession, recurring_id: uuid.UUID, workspace_id: uuid.UUID, *, commit: bool = True
 ) -> bool:
     recurring = await get_recurring_transaction(session, recurring_id, workspace_id)
     if not recurring:
         return False
-
     await session.delete(recurring)
-    await session.commit()
+    if commit:
+        await session.commit()
+    else:
+        await session.flush()
     return True
 
 

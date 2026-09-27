@@ -83,7 +83,7 @@ async def mcp(request: Request) -> JSONResponse:
         )
 
     if method == "tools/list":
-        return JSONResponse(content=_ok(req_id, {"tools": list_tools()}))
+        return JSONResponse(content=_ok(req_id, {"tools": list_tools(ctx)}))
 
     if method == "tools/call":
         name = params.get("name")

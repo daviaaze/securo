@@ -289,14 +289,17 @@ async def create_goal(
     workspace_id: uuid.UUID,
     user_id: uuid.UUID,
     data: GoalCreate,
+    *,
+    commit: bool = True,
 ) -> GoalRead:
     await _ensure_goal_link_scope(session, workspace_id, data)
     goal = Goal(
-        user_id=user_id,
         workspace_id=workspace_id,
+        user_id=user_id,
         name=data.name,
         target_amount=data.target_amount,
         current_amount=data.current_amount,
+        initial_amount=data.current_amount,
         currency=data.currency,
         target_date=data.target_date,
         tracking_type=data.tracking_type,
@@ -308,12 +311,12 @@ async def create_goal(
         metadata_json=data.metadata_json,
     )
     _clear_inactive_tracking_links(goal)
-    # Capture the starting balance so on-track logic measures progress from baseline
-    initial = await _resolve_current_amount(session, goal, user_id)
-    goal.initial_amount = initial
     session.add(goal)
-    await session.commit()
-    await session.refresh(goal)
+    if commit:
+        await session.commit()
+        await session.refresh(goal)
+    else:
+        await session.flush()
     return await _enrich_goal(session, goal, user_id)
 
 

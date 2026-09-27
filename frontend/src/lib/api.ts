@@ -1781,6 +1781,21 @@ export interface AgentMessage {
   output_tokens: number | null
   created_at: string
 }
+export type AgentProposalStatus = 'pending' | 'applied' | 'rejected' | 'expired'
+
+export interface AgentProposal {
+  proposal_id: string
+  kind: string
+  preview: Record<string, unknown>
+  status: AgentProposalStatus
+  expected_hash: string
+  expires_at: string
+  result: Record<string, unknown> | null
+}
+
+export interface AgentProposalDecisionPayload {
+  expected_hash: string
+}
 
 export interface AgentToolHandle {
   server: string
@@ -1903,6 +1918,24 @@ export const agents = {
     },
     remove: async (id: string): Promise<void> => {
       await api.delete(`/agents/conversations/${id}`)
+    },
+  },
+  proposals: {
+    list: async (): Promise<AgentProposal[]> => {
+      const { data } = await api.get('/agents/proposals')
+      return data
+    },
+    get: async (id: string): Promise<AgentProposal> => {
+      const { data } = await api.get(`/agents/proposals/${id}`)
+      return data
+    },
+    apply: async (id: string, payload: AgentProposalDecisionPayload): Promise<AgentProposal> => {
+      const { data } = await api.post(`/agents/proposals/${id}/apply`, payload)
+      return data
+    },
+    reject: async (id: string, payload: AgentProposalDecisionPayload): Promise<AgentProposal> => {
+      const { data } = await api.post(`/agents/proposals/${id}/reject`, payload)
+      return data
     },
   },
   // Streaming chat endpoint — caller handles the SSE response themselves

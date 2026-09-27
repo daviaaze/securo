@@ -14,7 +14,7 @@ from app.services import rule_service
 from mcp_server.auth import CallContext
 from mcp_server.registry import tool
 from mcp_server.tools._helpers import resolve_workspace_id
-from mcp_server.tools.proposals import _APPLY_FIELD, _PROPOSAL_PREFACE, _can_apply
+from mcp_server.tools.proposals import _PROPOSAL_PREFACE
 
 
 _RULE_CAPABILITIES = (
@@ -32,7 +32,6 @@ def _proposal_schema(
     if include_rule_id:
         schema["properties"]["rule_id"] = {"type": "string", "format": "uuid"}
         schema.setdefault("required", []).append("rule_id")
-    schema["properties"]["apply"] = _APPLY_FIELD
     return schema
 
 
@@ -138,7 +137,6 @@ async def propose_create_rule(
     is_active: bool = True,
     apply_to_existing: bool = True,
     overwrite_existing_categories: bool = False,
-    apply: bool = False,
 ) -> dict[str, Any]:
     workspace_id = await resolve_workspace_id(session, ctx)
     draft = RuleCreate.model_validate(
@@ -167,29 +165,8 @@ async def propose_create_rule(
         "kind": "create_rule",
         "proposed": draft.model_dump(mode="json"),
         "preview": preview.model_dump(mode="json"),
-        "apply_endpoint": "POST /api/rules",
     }
-    if not _can_apply(ctx, apply):
-        return proposal
-
-    created = await rule_service.create_rule(session, workspace_id, ctx.user_id, draft)
-    applied_count = (
-        await rule_service.apply_single_rule(
-            session,
-            workspace_id,
-            created,
-            overwrite_existing_categories=draft.overwrite_existing_categories,
-        )
-        if draft.apply_to_existing
-        else 0
-    )
-    return {
-        **proposal,
-        "applied": True,
-        "id": str(created.id),
-        "applied_count": applied_count,
-    }
-
+    return proposal
 
 @tool(
     name="propose_update_rule",
@@ -216,7 +193,6 @@ async def propose_update_rule(
     is_active: bool | None = None,
     apply_to_existing: bool | None = None,
     overwrite_existing_categories: bool = False,
-    apply: bool = False,
 ) -> dict[str, Any]:
     workspace_id = await resolve_workspace_id(session, ctx)
     rule = await rule_service.get_rule(session, uuid.UUID(rule_id), workspace_id)
@@ -266,33 +242,8 @@ async def propose_update_rule(
         "target": current.model_dump(mode="json", exclude={"user_id"}),
         "changes": update.model_dump(mode="json", exclude_unset=True),
         "preview": preview.model_dump(mode="json"),
-        "apply_endpoint": f"PATCH /api/rules/{rule_id}",
     }
-    if not _can_apply(ctx, apply):
-        return proposal
-
-    updated = await rule_service.update_rule(
-        session, uuid.UUID(rule_id), workspace_id, update
-    )
-    if updated is None:
-        return {"error": "rule not found"}
-    applied_count = (
-        await rule_service.apply_single_rule(
-            session,
-            workspace_id,
-            updated,
-            overwrite_existing_categories=update.overwrite_existing_categories,
-        )
-        if should_apply
-        else 0
-    )
-    return {
-        **proposal,
-        "applied": True,
-        "id": str(updated.id),
-        "applied_count": applied_count,
-    }
-
+    return proposal
 
 @tool(
     name="propose_delete_rule",
@@ -302,7 +253,6 @@ async def propose_update_rule(
         "type": "object",
         "properties": {
             "rule_id": {"type": "string", "format": "uuid"},
-            "apply": _APPLY_FIELD,
         },
         "required": ["rule_id"],
         "additionalProperties": False,
@@ -315,7 +265,6 @@ async def propose_delete_rule(
     session: AsyncSession,
     ctx: CallContext,
     rule_id: str,
-    apply: bool = False,
 ) -> dict[str, Any]:
     workspace_id = await resolve_workspace_id(session, ctx)
     rule = await rule_service.get_rule(session, uuid.UUID(rule_id), workspace_id)
@@ -326,10 +275,5 @@ async def propose_delete_rule(
         "target": RuleRead.model_validate(rule).model_dump(
             mode="json", exclude={"user_id"}
         ),
-        "apply_endpoint": f"DELETE /api/rules/{rule_id}",
     }
-    if not _can_apply(ctx, apply):
-        return proposal
-
-    await rule_service.delete_rule(session, uuid.UUID(rule_id), workspace_id)
-    return {**proposal, "applied": True, "id": rule_id}
+    return proposal

@@ -1,0 +1,4 @@
+tools:
+  approval:
+    mcp__securo_approve_proposal: prompt
+    mcp__securo_reject_proposal: prompt

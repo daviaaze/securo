@@ -691,6 +691,8 @@ async def create_transaction(
     workspace_id: uuid.UUID,
     user_id: uuid.UUID,
     data: TransactionCreate,
+    *,
+    commit: bool = True,
 ) -> Transaction:
     # Verify account belongs to the workspace
     account_result = await session.execute(
@@ -698,74 +700,43 @@ async def create_transaction(
         .outerjoin(BankConnection)
         .where(
             Account.id == data.account_id,
-            or_(
-                Account.workspace_id == workspace_id,
-                BankConnection.workspace_id == workspace_id,
-            ),
+            or_(Account.workspace_id == workspace_id, BankConnection.workspace_id == workspace_id),
         )
     )
     account = account_result.scalar_one_or_none()
     if not account:
         raise ValueError("Account not found")
-
     await _ensure_category_in_workspace(session, workspace_id, data.category_id)
     await _ensure_payee_in_workspace(session, workspace_id, data.payee_id)
-
-    # Resolve currency: explicit value > account currency
     currency = data.currency or account.currency
-
     transaction = Transaction(
-        user_id=user_id,
-        workspace_id=workspace_id,
-        account_id=data.account_id,
-        category_id=data.category_id,  # use provided category if given
-        payee_id=data.payee_id,
-        external_id=data.external_id,
-        description=data.description,
-        amount=data.amount,
-        currency=currency,
-        date=data.date,
-        type=data.type,
-        source="manual",
-        # Manually-entered transactions default to "posted" (settled),
-        # matching the model default. Callers may still create them as
-        # "pending" (not yet settled) via TransactionCreate.status.
-        status=data.status or "posted",
-        notes=data.notes,
-        effective_bill_date=data.effective_bill_date,
-        installment_number=data.installment_number,
-        total_installments=data.total_installments,
-        installment_total_amount=data.installment_total_amount,
+        user_id=user_id, workspace_id=workspace_id, account_id=data.account_id,
+        category_id=data.category_id, payee_id=data.payee_id, external_id=data.external_id,
+        description=data.description, amount=data.amount, currency=currency, date=data.date,
+        type=data.type, source="manual", status=data.status or "posted", notes=data.notes,
+        effective_bill_date=data.effective_bill_date, installment_number=data.installment_number,
+        total_installments=data.total_installments, installment_total_amount=data.installment_total_amount,
         installment_purchase_date=data.installment_purchase_date,
     )
     if data.effective_bill_date is not None:
         await _resync_bill_link_from_override(session, transaction, account)
     apply_effective_date(transaction, account)
     session.add(transaction)
-    await session.flush()  # get ID without committing
-
-    # Apply rules only if no explicit category provided
+    await session.flush()
     if not data.category_id:
         await apply_rules_to_transaction(session, user_id, transaction)
-
-    # Stamp primary currency amount (manual override or auto)
     if data.amount_primary is not None or data.fx_rate_used is not None:
         _apply_fx_override(transaction, data.amount, data.amount_primary, data.fx_rate_used)
     else:
         await stamp_primary_amount(session, user_id, transaction)
-
     if data.splits is not None:
         await split_service.replace_splits(session, transaction, data.splits, user_id)
-
-    # A payment recorded by hand settles an invoice exactly as a synced one
-    # does. Someone who reconciles by typing the Pix in should not have to
-    # then go and link it: that is the manual work the whole feature exists
-    # to remove, and leaving this path out would remove it only for people
-    # whose bank happens to be connected.
     await reconciliation_service.match_incoming(session, workspace_id, [transaction])
-
-    await session.commit()
-    await session.refresh(transaction, ["category", "splits"])
+    if commit:
+        await session.commit()
+        await session.refresh(transaction, ["category", "splits"])
+    else:
+        await session.flush()
     return transaction
 
 
@@ -1619,18 +1590,20 @@ async def bulk_update_category(
     session: AsyncSession,
     workspace_id: uuid.UUID,
     transaction_ids: list[uuid.UUID],
-    category_id: Optional[uuid.UUID] = None,
+    category_id: Optional[uuid.UUID],
+    *,
+    commit: bool = True,
 ) -> int:
     await _ensure_category_in_workspace(session, workspace_id, category_id)
     result = await session.execute(
         update(Transaction)
-        .where(
-            Transaction.id.in_(transaction_ids),
-            Transaction.workspace_id == workspace_id,
-        )
+        .where(Transaction.id.in_(transaction_ids), Transaction.workspace_id == workspace_id)
         .values(category_id=category_id)
     )
-    await session.commit()
+    if commit:
+        await session.commit()
+    else:
+        await session.flush()
     return cast(CursorResult, result).rowcount
 
 

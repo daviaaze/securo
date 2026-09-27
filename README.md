@@ -197,6 +197,8 @@ COMPOSE_PROFILES=agents
 
 Then `docker compose up -d`. Settings → AI Agents to add a provider connection. Off by default; zero cost when off.
 
+Agents can read financial data and draft changes. Every write is saved as a persistent proposal; it is not applied until a workspace writer explicitly approves it in the Securo UI (or an interactive approval prompt in a configured MCP client). Proposals expire after 24 hours and are rejected if their reviewed target changes. MCP proposal tools never write directly, even when called by an external client.
+
 ### Without Docker
 
 `COMPOSE_PROFILES=agents` only tells Docker Compose to start the extra `mcp-server` container, so on a bare-metal or LXC install set `AGENTS_ENABLED=true` alone. The built-in MCP server is a plain uvicorn app in the same virtualenv; run it next to the API and point the backend at it:

@@ -163,32 +163,34 @@ async def create_budget(
     workspace_id: uuid.UUID,
     user_id: uuid.UUID,
     data: BudgetCreate,
+    *,
+    commit: bool = True,
 ) -> Budget:
     budget = Budget(
-        user_id=user_id,
-        workspace_id=workspace_id,
-        category_id=data.category_id,
-        amount=data.amount,
-        month=data.month.replace(day=1),
-        is_recurring=data.is_recurring,
+        user_id=user_id, workspace_id=workspace_id, category_id=data.category_id,
+        amount=data.amount, month=data.month, is_recurring=data.is_recurring,
     )
     session.add(budget)
-    await session.commit()
-    await session.refresh(budget)
-    return budget
-
+    if commit:
+        await session.commit()
+        await session.refresh(budget)
+    else:
+        await session.flush()
 
 async def update_budget(
-    session: AsyncSession, budget_id: uuid.UUID, workspace_id: uuid.UUID, data: BudgetUpdate
+    session: AsyncSession,
+    budget_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+    data: BudgetUpdate,
+    *,
+    commit: bool = True,
 ) -> Optional[Budget]:
     budget = await get_budget(session, budget_id, workspace_id)
     if not budget:
         return None
-
     if budget.is_recurring and data.effective_month:
         effective = data.effective_month.replace(day=1)
         if effective != budget.month:
-            # Create a new recurring record with new effective-from month
             new_budget = Budget(
                 user_id=budget.user_id,
                 workspace_id=budget.workspace_id,
@@ -198,30 +200,37 @@ async def update_budget(
                 is_recurring=True,
             )
             session.add(new_budget)
-            await session.commit()
-            await session.refresh(new_budget)
+            if commit:
+                await session.commit()
+                await session.refresh(new_budget)
+            else:
+                await session.flush()
             return new_budget
-
-    # Update in place (non-recurring, or same effective-from month)
     for key, value in data.model_dump(exclude_unset=True, exclude={"effective_month"}).items():
         setattr(budget, key, value)
-
-    await session.commit()
-    await session.refresh(budget)
+    if commit:
+        await session.commit()
+        await session.refresh(budget)
+    else:
+        await session.flush()
     return budget
 
-
 async def delete_budget(
-    session: AsyncSession, budget_id: uuid.UUID, workspace_id: uuid.UUID
+    session: AsyncSession,
+    budget_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+    *,
+    commit: bool = True,
 ) -> bool:
     budget = await get_budget(session, budget_id, workspace_id)
     if not budget:
         return False
-
     await session.delete(budget)
-    await session.commit()
+    if commit:
+        await session.commit()
+    else:
+        await session.flush()
     return True
-
 
 async def get_budget_vs_actual(
     session: AsyncSession,

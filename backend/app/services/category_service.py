@@ -153,11 +153,16 @@ async def create_category(
     workspace_id: uuid.UUID,
     user_id: uuid.UUID,
     data: CategoryCreate,
+    *,
+    commit: bool = True,
 ) -> Category:
     category = Category(user_id=user_id, workspace_id=workspace_id, **data.model_dump())
     session.add(category)
-    await session.commit()
-    await session.refresh(category)
+    if commit:
+        await session.commit()
+        await session.refresh(category)
+    else:
+        await session.flush()
     return category
 
 
@@ -194,8 +199,6 @@ async def deactivate_rules_assigning_category(
     for rule in rules:
         rule.is_active = False
     return len(rules)
-
-
 async def update_category(
     session: AsyncSession,
     category_id: uuid.UUID,
@@ -203,45 +206,41 @@ async def update_category(
     data: CategoryUpdate,
     *,
     deactivate_rules: bool = False,
+    commit: bool = True,
 ) -> Optional[Category]:
-    """Update a category, optionally retiring the rules that assign it.
-
-    `deactivate_rules` only applies when the category is being hidden: the
-    rules that filed transactions under it would otherwise stay listed as
-    active while the engine skips their categorization.
-    """
+    """Update category, optionally retiring assigning rules."""
     category = await get_category(session, category_id, workspace_id)
     if not category:
         return None
-
     changes = data.model_dump(exclude_unset=True)
     if changes.get("is_hidden") is True and not category.is_system:
         raise CategoryVisibilityError("Only system categories can be hidden")
-
     for key, value in changes.items():
         setattr(category, key, value)
-
     if deactivate_rules and changes.get("is_hidden") is True:
         await deactivate_rules_assigning_category(session, workspace_id, category_id)
-
-    await session.commit()
-    await session.refresh(category)
+    if commit:
+        await session.commit()
+        await session.refresh(category)
+    else:
+        await session.flush()
     return category
 
 
 async def delete_category(
-    session: AsyncSession, category_id: uuid.UUID, workspace_id: uuid.UUID
+    session: AsyncSession, category_id: uuid.UUID, workspace_id: uuid.UUID, *, commit: bool = True
 ) -> bool:
     category = await get_category(session, category_id, workspace_id)
     if not category or category.is_system:
         return False
-
     try:
         await session.delete(category)
-        await session.commit()
+        if commit:
+            await session.commit()
+        else:
+            await session.flush()
     except IntegrityError as exc:
-        await session.rollback()
-        raise ValueError(
-            "Category is still in use and cannot be deleted. Remove its references first."
-        ) from exc
+        if commit:
+            await session.rollback()
+        raise ValueError("Category is still in use and cannot be deleted. Remove its references first.") from exc
     return True
