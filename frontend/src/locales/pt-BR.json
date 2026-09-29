@@ -2437,6 +2437,10 @@
       "model": "Modelo",
       "modelPlaceholder": "llama3.1:8b, gpt-4o-mini, ...",
       "temperature": "Temperatura",
+      "historyMessages": "Mensagens no histórico (1–200)",
+      "topN": "Trechos recuperados (0–50)",
+      "similarityThreshold": "Similaridade mínima (0–1)",
+      "invalidRetrievalSettings": "Informe valores válidos de histórico, trechos e similaridade.",
       "cancel": "Cancelar",
       "save": "Salvar",
       "create": "Criar",
@@ -2500,7 +2504,13 @@
       "loading": "Carregando ferramentas…"
     },
     "chat": {
-      "placeholder": "Converse com {{name}}..."
+      "placeholder": "Converse com {{name}}...",
+      "tokens": "{{input}} tokens de entrada / {{output}} de saída",
+      "calls": "{{chat}} chamadas de chat / {{compaction}} de compactação",
+      "latency": "Média {{ms}} ms",
+      "cost": "Custo estimado {{cost}}",
+      "costUnknown": "desconhecido",
+      "earlierCompacted": "Mensagens anteriores compactadas"
     },
     "chart": {
       "noData": "Sem dados para o gráfico"

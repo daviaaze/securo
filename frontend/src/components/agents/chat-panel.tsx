@@ -60,6 +60,13 @@ export function ChatPanel({ agent, conversationId, onConversationCreated, focusS
     staleTime: 1000 * 5,
   })
 
+  const { data: usage } = useQuery({
+    queryKey: ['agent-conv-usage', conversationId],
+    queryFn: () => agents.conversations.usage(conversationId!),
+    enabled: !!conversationId,
+    staleTime: 1000 * 5,
+  })
+
   // Snap to bottom when the conversation switches (it should look fresh)
   // and move keyboard focus to the input — covers both "+" (null) and
   // selecting an existing conversation. focusSignal also triggers focus
@@ -178,6 +185,7 @@ export function ChatPanel({ agent, conversationId, onConversationCreated, focusS
       if (activeConvId) {
         try {
           await qc.refetchQueries({ queryKey: ['agent-conv-messages', activeConvId] })
+          await qc.refetchQueries({ queryKey: ['agent-conv-usage', activeConvId] })
         } catch {
           // ignore — we still want to clear the draft below
         }
@@ -290,6 +298,17 @@ export function ChatPanel({ agent, conversationId, onConversationCreated, focusS
           </div>
         )}
       </div>
+      {usage && (
+        <div className="shrink-0 border-t px-3 py-1 text-xs text-muted-foreground flex flex-wrap gap-x-3 gap-y-1">
+          <span>{t('agents.chat.tokens', { input: usage.input_tokens, output: usage.output_tokens })}</span>
+          <span>{t('agents.chat.calls', { chat: usage.chat_calls, compaction: usage.compaction_calls })}</span>
+          <span>{t('agents.chat.latency', { ms: usage.avg_latency_ms == null ? '—' : Math.round(usage.avg_latency_ms) })}</span>
+          <span>{t('agents.chat.cost', {
+            cost: usage.estimated_cost_usd == null ? t('agents.chat.costUnknown') : `$${usage.estimated_cost_usd.toFixed(6)}`,
+          })}</span>
+          {usage.compacted_through_ordinal > 0 && <span>{t('agents.chat.earlierCompacted')}</span>}
+        </div>
+      )}
       <div className="shrink-0 border-t p-3 flex items-end gap-2 bg-background">
         <textarea
           ref={inputRef}

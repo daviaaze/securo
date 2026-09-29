@@ -2452,6 +2452,10 @@
       "model": "Model",
       "modelPlaceholder": "llama3.1:8b, gpt-4o-mini, ...",
       "temperature": "Temperature",
+      "historyMessages": "History rows (1–200)",
+      "topN": "Document hits (0–50)",
+      "similarityThreshold": "Minimum similarity (0–1)",
+      "invalidRetrievalSettings": "Enter valid history, document hits, and similarity values.",
       "cancel": "Cancel",
       "save": "Save",
       "create": "Create",
@@ -2515,7 +2519,13 @@
       "loading": "Loading tools…"
     },
     "chat": {
-      "placeholder": "Talk to {{name}}..."
+      "placeholder": "Talk to {{name}}...",
+      "tokens": "{{input}} input / {{output}} output tokens",
+      "calls": "{{chat}} chat / {{compaction}} compaction calls",
+      "latency": "Avg {{ms}} ms",
+      "cost": "Estimated cost {{cost}}",
+      "costUnknown": "unknown",
+      "earlierCompacted": "Earlier turns compacted"
     },
     "chart": {
       "noData": "No data to chart"

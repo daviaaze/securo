@@ -1760,6 +1760,17 @@ export interface LlmConnectionTestResult {
   models?: string[]
 }
 
+export interface AgentConversationUsage {
+  input_tokens: number
+  output_tokens: number
+  chat_calls: number
+  compaction_calls: number
+  avg_latency_ms: number | null
+  estimated_cost_usd: number | null
+  compacted_through_ordinal: number
+}
+
+
 export interface AgentConversation {
   id: string
   agent_id: string
@@ -1906,6 +1917,10 @@ export const agents = {
     },
     messages: async (id: string, limit = 200): Promise<AgentMessage[]> => {
       const { data } = await api.get(`/agents/conversations/${id}/messages`, { params: { limit } })
+      return data
+    },
+    usage: async (id: string): Promise<AgentConversationUsage> => {
+      const { data } = await api.get(`/agents/conversations/${id}/usage`)
       return data
     },
     rename: async (id: string, title: string): Promise<AgentConversation> => {

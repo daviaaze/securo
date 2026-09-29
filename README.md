@@ -199,6 +199,12 @@ Then `docker compose up -d`. Settings → AI Agents to add a provider connection
 
 Agents can read financial data and draft changes. Every write is saved as a persistent proposal; it is not applied until a workspace writer explicitly approves it in the Securo UI (or an interactive approval prompt in a configured MCP client). Proposals expire after 24 hours and are rejected if their reviewed target changes. MCP proposal tools never write directly, even when called by an external client.
 
+Agent settings expose history rows, document hits and minimum similarity per agent. The runtime keeps complete conversation turns, including parallel tool results, within `AGENTS_HISTORY_BUDGET_BYTES` (default 24,576) and `AGENTS_REQUEST_BUDGET_BYTES` (default 49,152). Older prose may be summarized as an untrusted preference/intent note; raw messages remain in the transcript. Summaries never replace current financial evidence: monetary answers must query live tools. Oversized tool-result batches return per-tool errors; an irreducibly large prompt reports a context-size error rather than silently truncating financial data.
+
+Financial tools report computed current balances and native account currencies. Aggregates use the user's primary currency unless filtered to a native currency; a missing conversion returns an error, not a mixed-currency total. Credit-card bills are only available when imported bills exist. Knowledge search uses ready documents embedded with the currently configured model and includes document titles/sources for citations.
+
+The chat footer shows per-conversation input/output tokens, chat and compaction calls, average latency and estimated USD cost. Unknown pricing is shown as unknown, not zero. A compacted-history indicator appears when a summary checkpoint exists. For local, synthetic-only Ollama checks, see `backend/scripts/README.md`.
+
 ### Without Docker
 
 `COMPOSE_PROFILES=agents` only tells Docker Compose to start the extra `mcp-server` container, so on a bare-metal or LXC install set `AGENTS_ENABLED=true` alone. The built-in MCP server is a plain uvicorn app in the same virtualenv; run it next to the API and point the backend at it:

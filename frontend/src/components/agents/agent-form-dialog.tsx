@@ -41,6 +41,9 @@ export function AgentFormDialog({ open, onOpenChange, agent }: Props) {
   const [model, setModel] = useState('')
   const [temperature, setTemperature] = useState('0.4')
   const [autoContext, setAutoContext] = useState(true)
+  const [maxHistoryMessages, setMaxHistoryMessages] = useState('20')
+  const [topN, setTopN] = useState('6')
+  const [similarityThreshold, setSimilarityThreshold] = useState('0.25')
   const [isDefault, setIsDefault] = useState(false)
 
   const { data: connections } = useQuery({
@@ -57,6 +60,9 @@ export function AgentFormDialog({ open, onOpenChange, agent }: Props) {
       setConnectionId(agent.connection_id ?? '')
       setModel(agent.model ?? '')
       setTemperature(String(agent.temperature ?? 0.4))
+      setMaxHistoryMessages(String(agent.max_history_messages ?? 20))
+      setTopN(String(agent.top_n ?? 6))
+      setSimilarityThreshold(String(agent.similarity_threshold ?? 0.25))
       setAutoContext(agent.auto_context ?? true)
       setIsDefault(agent.is_default ?? false)
     } else {
@@ -68,6 +74,9 @@ export function AgentFormDialog({ open, onOpenChange, agent }: Props) {
       setConnectionId('')
       setModel('')
       setTemperature('0.4')
+      setMaxHistoryMessages('20')
+      setTopN('6')
+      setSimilarityThreshold('0.25')
       setAutoContext(true)
       setIsDefault(false)
     }
@@ -109,6 +118,17 @@ export function AgentFormDialog({ open, onOpenChange, agent }: Props) {
       toast.error(t('agents.form.connectionRequired', 'Pick a connection — agents need one to talk to an LLM.'))
       return
     }
+    const history = Number(maxHistoryMessages)
+    const retrieved = Number(topN)
+    const threshold = Number(similarityThreshold)
+    if (
+      !maxHistoryMessages.trim() || !Number.isInteger(history) || history < 1 || history > 200 ||
+      !topN.trim() || !Number.isInteger(retrieved) || retrieved < 0 || retrieved > 50 ||
+      !similarityThreshold.trim() || !Number.isFinite(threshold) || threshold < 0 || threshold > 1
+    ) {
+      toast.error(t('agents.form.invalidRetrievalSettings'))
+      return
+    }
     saveMut.mutate({
       name: name.trim(),
       description: description.trim() || null,
@@ -116,6 +136,9 @@ export function AgentFormDialog({ open, onOpenChange, agent }: Props) {
       connection_id: connectionId,
       model: model.trim() || null,
       temperature: Number(temperature) || 0.4,
+      max_history_messages: history,
+      top_n: retrieved,
+      similarity_threshold: threshold,
       auto_context: autoContext,
       is_default: isDefault,
     })
@@ -125,7 +148,7 @@ export function AgentFormDialog({ open, onOpenChange, agent }: Props) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-xl">
+      <DialogContent className="max-w-xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{isEdit ? t('agents.form.editTitle') : t('agents.form.createTitle')}</DialogTitle>
         </DialogHeader>
@@ -232,6 +255,23 @@ export function AgentFormDialog({ open, onOpenChange, agent }: Props) {
               value={temperature}
               onChange={(e) => setTemperature(e.target.value)}
             />
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            <div className="grid gap-2">
+              <Label htmlFor="agent-history">{t('agents.form.historyMessages')}</Label>
+              <Input id="agent-history" type="number" min="1" max="200" step="1"
+                value={maxHistoryMessages} onChange={(e) => setMaxHistoryMessages(e.target.value)} />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="agent-top-n">{t('agents.form.topN')}</Label>
+              <Input id="agent-top-n" type="number" min="0" max="50" step="1"
+                value={topN} onChange={(e) => setTopN(e.target.value)} />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="agent-threshold">{t('agents.form.similarityThreshold')}</Label>
+              <Input id="agent-threshold" type="number" min="0" max="1" step="0.05"
+                value={similarityThreshold} onChange={(e) => setSimilarityThreshold(e.target.value)} />
+            </div>
           </div>
           <div className="rounded-md border p-3 flex items-start gap-3">
             <Switch checked={autoContext} onCheckedChange={(v) => setAutoContext(!!v)} />
