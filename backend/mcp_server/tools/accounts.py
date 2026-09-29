@@ -41,12 +41,65 @@ async def list_accounts(
             "name": r.get("name"),
             "type": r.get("type"),
             "currency": r.get("currency"),
-            "balance": num(r.get("balance")),
-            "balance_primary": num(r.get("balance_primary")),
-            "is_closed": bool(r.get("is_closed", False)),
+            "balance": num(r.get("current_balance")),
+            "current_balance": num(r.get("current_balance")),
+            "credit_limit": num(r.get("credit_limit")),
+            "available_credit": num(r.get("available_credit")),
+            "statement_close_day": r.get("statement_close_day"),
+            "payment_due_day": r.get("payment_due_day"),
+            "next_close_date": r["next_close_date"].isoformat() if r.get("next_close_date") else None,
+            "next_due_date": r["next_due_date"].isoformat() if r.get("next_due_date") else None,
             "institution": r.get("institution_name"),
         })
     return {"items": items, "total": len(items)}
+
+
+@tool(
+    name="list_credit_card_bills",
+    description=(
+        "List imported provider bills for one credit card, newest due date first. "
+        "No imported bills is not proof of zero debt; check current balance."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "account_id": {"type": "string", "format": "uuid"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 24, "default": 12},
+        },
+        "required": ["account_id"],
+        "additionalProperties": False,
+    },
+    tags=["read", "accounts"],
+)
+async def list_credit_card_bills(
+    *, session: AsyncSession, ctx: CallContext, account_id: str, limit: int = 12,
+) -> dict[str, Any]:
+    ws_id = await resolve_workspace_id(session, ctx)
+    try:
+        account_uuid = parse_uuid(account_id)
+    except ValueError:
+        return {"error": "account not found"}
+    if account_uuid is None:
+        return {"error": "account not found"}
+    account = await account_service.get_account(session, account_uuid, ws_id)
+    if account is None:
+        return {"error": "account not found"}
+    if account.type != "credit_card":
+        return {"items": [], "total": 0, "status": "not_credit_card"}
+    bills = await account_service.get_credit_card_bills(
+        session, account_uuid, ws_id, limit=max(1, min(int(limit), 24)),
+    )
+    items = [{
+        "id": str(bill.id),
+        "due_date": bill.due_date.isoformat(),
+        "total_amount": num(bill.total_amount),
+        "currency": bill.currency,
+        "minimum_payment": num(bill.minimum_payment),
+    } for bill in bills or []]
+    return {
+        "items": items, "total": len(items),
+        "status": "available" if items else "no_provider_bills",
+    }
 
 
 @tool(

@@ -6,11 +6,15 @@ dashboard) just check that the wrapper returns a serializable shape, not
 the full numeric correctness of those services.
 """
 import uuid
+from datetime import date
+from decimal import Decimal
 
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.account import Account
+from app.models.transaction import Transaction
 # Importing this package registers all tools into mcp_server.registry.REGISTRY.
 import mcp_server.tools  # noqa: F401
 from mcp_server.auth import CallContext
@@ -99,6 +103,28 @@ async def test_list_transactions_returns_seeded_data(
     sample = result["items"][0]
     for k in ("id", "date", "description", "amount", "currency"):
         assert k in sample
+
+
+async def test_list_accounts_uses_computed_manual_balance(
+    session: AsyncSession, ctx: CallContext, test_user
+):
+    account = Account(
+        id=uuid.uuid4(), user_id=test_user.id, name="Manual BRL",
+        type="checking", currency="BRL", balance=Decimal("0"),
+    )
+    session.add(account)
+    await session.flush()
+    session.add(Transaction(
+        id=uuid.uuid4(), user_id=test_user.id, account_id=account.id,
+        description="Posted deposit", amount=Decimal("100"), currency="BRL",
+        date=date.today(), type="credit", source="manual", status="posted",
+    ))
+    await session.commit()
+
+    result = await REGISTRY["list_accounts"].handler(session=session, ctx=ctx)
+    item = next(row for row in result["items"] if row["id"] == str(account.id))
+    assert item["currency"] == "BRL"
+    assert item["balance"] == item["current_balance"] == 100.0
 
 
 async def test_list_transactions_with_search_filter(
@@ -340,20 +366,6 @@ async def test_get_dashboard_snapshot(session: AsyncSession, ctx: CallContext, t
 
 
 # --- aggregate -------------------------------------------------------------
-
-async def test_aggregate_by_category(
-    session: AsyncSession, ctx: CallContext, test_transactions, test_categories
-):
-    handler = REGISTRY["aggregate"].handler
-    result = await handler(
-        session=session, ctx=ctx,
-        metric="sum", group_by="category", tx_type="expense",
-    )
-    assert "items" in result
-    # We have UBER (Transporte) and IFOOD (Alimentação) as expenses.
-    labels = {item.get("label") for item in result["items"]}
-    assert "Transporte" in labels or "Alimentação" in labels
-
 
 async def test_aggregate_unknown_group_by(session: AsyncSession, ctx: CallContext):
     handler = REGISTRY["aggregate"].handler

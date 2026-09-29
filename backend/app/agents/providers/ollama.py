@@ -70,6 +70,9 @@ class OllamaProvider(LLMProvider):
             "messages": _serialize_messages(messages),
             "stream": True,
             "options": {"temperature": temperature},
+            # Thinking-only generations can terminate without a user-visible
+            # answer after a tool result. The agent needs a final response.
+            "think": False,
         }
         if max_tokens is not None:
             payload["options"]["num_predict"] = max_tokens

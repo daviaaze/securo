@@ -17,26 +17,33 @@ os.environ.setdefault("AGENTS_BUILTIN_MCP_URL", "http://test-mcp:8765/mcp")
 os.environ["SECRET_KEY"] = "synthetic-test-signing-key-not-for-production"
 os.environ["CREDENTIALS_DIRECTORY"] = ""
 
-# pgvector's Vector type only compiles on PostgreSQL. Tests use SQLite, so
-# we shim it with JSON before any model module imports it. Production runs
-# pgvector unchanged.
+# SQLite stores vectors as JSON; PostgreSQL tests retain the real pgvector
+# column/operator, rather than silently testing a constant similarity score.
 import sqlalchemy.types  # noqa: E402
 import pgvector.sqlalchemy as _pgv  # noqa: E402
 
+_NativeVector = _pgv.Vector
 
-class _VectorJSON(sqlalchemy.types.JSON):
-    """JSON-backed stand-in for pgvector's Vector type, for SQLite tests."""
 
+class _VectorJSON(sqlalchemy.types.TypeDecorator):
+    impl = sqlalchemy.types.JSON
     cache_ok = True
 
     def __init__(self, dim=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.dim = dim
 
-    def cosine_distance(self, other):  # type: ignore[override]
-        # Tests for similarity_search are exercised against the real Postgres;
-        # the SQLite path just needs a valid SQL fragment.
-        from sqlalchemy import literal
-        return literal(0.5)
+    def load_dialect_impl(self, dialect):
+        if dialect.name == "postgresql":
+            return dialect.type_descriptor(_NativeVector(self.dim))
+        return dialect.type_descriptor(sqlalchemy.types.JSON())
+
+    class comparator_factory(sqlalchemy.types.JSON.Comparator):
+        def cosine_distance(self, other):
+            from sqlalchemy import bindparam
+            return self.expr.op("<=>", return_type=sqlalchemy.types.Float())(
+                bindparam(None, other, type_=_NativeVector(self.type.dim))
+            )
 
 
 setattr(_pgv, "Vector", _VectorJSON)

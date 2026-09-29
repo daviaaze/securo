@@ -188,3 +188,47 @@ async def test_list_messages_window_keeps_newest_turns(session, test_user, test_
     assert [m.content for m in msgs] == [f"msg-{i}" for i in range(20, 30)]
     ordinals = [m.ordinal for m in msgs]
     assert ordinals == sorted(ordinals)
+
+@pytest.mark.asyncio
+async def test_complete_turns_keeps_parallel_results_and_omits_interrupted_exchange(
+    session, test_user, test_workspace, test_agent,
+):
+    conv = await svc.create_conversation(
+        session, workspace_id=test_workspace.id, user_id=test_user.id, agent_id=test_agent.id,
+    )
+    async def add(role, content=None, **kwargs):
+        await svc.append_message(session, conversation_id=conv.id, role=role, content=content, **kwargs)
+
+    await add("user", "first")
+    await add("assistant", tool_calls=[
+        {"id": "a", "name": "lookup", "arguments": {}},
+        {"id": "b", "name": "lookup", "arguments": {}},
+    ])
+    await add("tool", "value-a", tool_result={"tool_call_id": "a", "name": "lookup"})
+    await add("tool", "value-b", tool_result={"tool_call_id": "b", "name": "lookup"})
+    await add("assistant", "answer")
+    await add("user", "interrupted")
+    await add("assistant", tool_calls=[{"id": "c", "name": "lookup", "arguments": {}}])
+    await add("tool", "partial", tool_result={"tool_call_id": "c", "name": "lookup"})
+    await add("user", "live")
+    rows = await svc.uncheckpointed_messages(session, conv.id)
+    turns, current, incomplete = svc.complete_turns(rows)
+    assert [[m.role for m in turn] for turn in turns] == [
+        ["user", "assistant", "tool", "tool", "assistant"],
+    ]
+    assert [m.content for m in current] == ["live"]
+    assert incomplete
+    assert len(rows) == 9  # Omission from context never deletes raw transcript.
+
+
+@pytest.mark.asyncio
+async def test_summary_checkpoint_rejects_stale_cursor(
+    session, test_user, test_workspace, test_agent,
+):
+    conv = await svc.create_conversation(
+        session, workspace_id=test_workspace.id, user_id=test_user.id, agent_id=test_agent.id,
+    )
+    assert await svc.checkpoint_summary(session, conv.id, None, 5, "first")
+    assert not await svc.checkpoint_summary(session, conv.id, None, 8, "stale")
+    await session.refresh(conv)
+    assert (conv.summary, conv.summary_through_ordinal) == ("first", 5)

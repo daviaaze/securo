@@ -160,6 +160,7 @@ async def similarity_search(
     *,
     agent_id: uuid.UUID,
     query_embedding: list[float],
+    embedding_model: str,
     top_n: int = 6,
     similarity_threshold: float = 0.0,
 ) -> list[dict[str, Any]]:
@@ -172,9 +173,18 @@ async def similarity_search(
             KnowledgeChunk.doc_id,
             KnowledgeChunk.ordinal,
             KnowledgeChunk.content,
+            KnowledgeDoc.title,
+            KnowledgeDoc.source,
             distance.label("distance"),
         )
-        .where(KnowledgeChunk.agent_id == agent_id)
+        .join(KnowledgeDoc, KnowledgeDoc.id == KnowledgeChunk.doc_id)
+        .where(
+            KnowledgeChunk.agent_id == agent_id,
+            KnowledgeDoc.agent_id == agent_id,
+            KnowledgeDoc.status == "ready",
+            KnowledgeChunk.embedding_model == embedding_model,
+            KnowledgeChunk.embedding.is_not(None),
+        )
         .order_by(distance.asc())
         .limit(int(top_n) * 3)  # over-fetch then threshold-filter
     )
@@ -189,6 +199,8 @@ async def similarity_search(
             "doc_id": str(r.doc_id),
             "ordinal": int(r.ordinal),
             "content": r.content,
+            "title": r.title,
+            "source": r.source,
             "score": score,
         })
         if len(out) >= top_n:

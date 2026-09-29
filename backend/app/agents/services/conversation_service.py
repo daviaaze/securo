@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.models.conversation import Conversation, Message
@@ -83,6 +83,84 @@ async def list_messages(
     rows = list((await session.execute(q)).scalars().all())
     rows.reverse()
     return rows
+
+
+async def uncheckpointed_messages(
+    session: AsyncSession, conversation_id: uuid.UUID, cursor: int = 0,
+) -> list[Message]:
+    """Read all raw rows after the last committed summary checkpoint."""
+    return list((await session.execute(
+        select(Message).where(
+            Message.conversation_id == conversation_id, Message.ordinal > cursor,
+        ).order_by(Message.ordinal)
+    )).scalars().all())
+
+
+def complete_turns(rows: list[Message]) -> tuple[list[list[Message]], list[Message], bool]:
+    """Split complete user→assistant turns without severing parallel tool calls.
+
+    The last, newly persisted user row is returned separately. Any interrupted
+    historical exchange is omitted as a unit, never replayed as orphaned tools.
+    """
+    turns: list[list[Message]] = []
+    pending: list[Message] = []
+    outstanding: set[str] = set()
+    incomplete = False
+    for row in rows:
+        if row.role == "user":
+            if pending:
+                incomplete = True
+            pending = [row]
+            outstanding.clear()
+        elif not pending:
+            incomplete = True
+        elif row.role == "assistant":
+            pending.append(row)
+            if row.tool_calls:
+                ids = {call.get("id") for call in row.tool_calls}
+                if outstanding or None in ids or len(ids) != len(row.tool_calls):
+                    incomplete = True
+                    pending = []
+                else:
+                    outstanding = ids
+            elif not outstanding:
+                turns.append(pending)
+                pending = []
+        elif row.role == "tool":
+            call_id = (row.tool_result or {}).get("tool_call_id")
+            if call_id not in outstanding:
+                incomplete = True
+                pending = []
+                outstanding.clear()
+            else:
+                pending.append(row)
+                outstanding.remove(call_id)
+        else:
+            incomplete = True
+            pending = []
+            outstanding.clear()
+    current = pending if len(pending) == 1 and pending[0].role == "user" else []
+    if pending and not current:
+        incomplete = True
+    return turns, current, incomplete
+
+
+async def checkpoint_summary(
+    session: AsyncSession, conversation_id: uuid.UUID,
+    previous_cursor: Optional[int], through_ordinal: int, summary: str,
+) -> bool:
+    """Compare-and-set the summary cursor; concurrent runs cannot overwrite it."""
+    prior = (Conversation.summary_through_ordinal.is_(None) if previous_cursor is None
+             else Conversation.summary_through_ordinal == previous_cursor)
+    result = await session.execute(
+        update(Conversation).where(
+            Conversation.id == conversation_id, prior,
+            (Conversation.summary_through_ordinal.is_(None) if previous_cursor is None
+             else Conversation.summary_through_ordinal < through_ordinal),
+        ).values(summary=summary, summary_through_ordinal=through_ordinal)
+    )
+    await session.commit()
+    return result.rowcount == 1
 
 
 async def append_message(

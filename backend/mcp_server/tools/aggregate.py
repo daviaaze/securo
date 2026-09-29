@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.transaction import Transaction
+from app.models.account import Account
 from app.models.category import Category
+from app.models.transaction import Transaction
+from app.models.user import User
+from app.services import admin_service
+from app.services._query_filters import counts_as_pnl, is_not_ignored, reporting_date_col
 from mcp_server.auth import CallContext
 from mcp_server.registry import tool
 from mcp_server.tools._helpers import num, parse_date, parse_uuid_list, resolve_workspace_id
@@ -17,10 +22,10 @@ from mcp_server.tools._helpers import num, parse_date, parse_uuid_list, resolve_
     description=(
         "Aggregate transactions without writing custom SQL. Choose a metric "
         "(sum|count|avg) and a group_by (category|month|account|payee|day). "
-        "Returns a list of {bucket, value, count} rows. Amounts use the "
-        "user's primary currency when available, falling back to native. "
-        "By default counts only POSTED transactions (already settled) — "
-        "set status='all' or 'pending' to include scheduled/recurring rows."
+        "Returns {bucket,value,count} rows in primary currency unless a native "
+        "currency filter is set. Missing FX returns an error, never a mixed sum. "
+        "Gross transaction basis (not split-adjusted). Defaults to posted rows; "
+        "status='pending' or 'all' includes other statuses."
     ),
     parameters={
         "type": "object",
@@ -65,7 +70,19 @@ async def aggregate(
     # token-tight providers.
     limit = max(1, min(int(limit), 50))
     ws_id = await resolve_workspace_id(session, ctx)
-    amount_col = func.coalesce(Transaction.amount_primary, Transaction.amount)
+    user = await session.get(User, ctx.user_id)
+    if user is None or not re.fullmatch(r"[A-Za-z]{3}", user.primary_currency or ""):
+        return {"error": "primary_currency_unavailable"}
+    primary_currency = user.primary_currency.upper()
+    mode = await admin_service.get_credit_card_accounting_mode(session)
+    reporting_date = reporting_date_col(mode)
+    amount_col = (
+        Transaction.amount if currency else
+        case(
+            (Transaction.currency == primary_currency, Transaction.amount),
+            else_=Transaction.amount_primary,
+        )
+    )
 
     # Group expression + label expression.
     if group_by == "category":
@@ -78,10 +95,10 @@ async def aggregate(
         bucket_id = Transaction.payee_id
         label_q = None
     elif group_by == "month":
-        bucket_id = func.to_char(Transaction.date, "YYYY-MM")
+        bucket_id = func.to_char(reporting_date, "YYYY-MM")
         label_q = None
     elif group_by == "day":
-        bucket_id = func.to_char(Transaction.date, "YYYY-MM-DD")
+        bucket_id = func.to_char(reporting_date, "YYYY-MM-DD")
         label_q = None
     else:
         return {"error": f"unknown group_by: {group_by}"}
@@ -93,53 +110,66 @@ async def aggregate(
     else:  # count
         value_expr = func.count(Transaction.id)
 
-    q = (
-        select(bucket_id.label("bucket"), value_expr.label("value"), func.count(Transaction.id).label("count"))
-        .where(Transaction.workspace_id == ws_id)
-    )
-
+    filters = [
+        Transaction.workspace_id == ws_id,
+        Account.workspace_id == ws_id,
+        Account.is_closed.is_(False),
+        Transaction.source != "opening_balance",
+        counts_as_pnl() if exclude_transfers else and_(
+            is_not_ignored(),
+            Transaction.exclude_from_pnl.is_(False),
+            ~and_(Transaction.source == "settlement", Transaction.type == "debit"),
+        ),
+    ]
     fd = parse_date(from_date)
     td = parse_date(to_date)
     if fd:
-        q = q.where(Transaction.date >= fd)
+        filters.append(reporting_date >= fd)
     if td:
-        q = q.where(Transaction.date <= td)
+        filters.append(reporting_date <= td)
 
     accs = parse_uuid_list(account_ids)
     if accs:
-        q = q.where(Transaction.account_id.in_(accs))
+        filters.append(Transaction.account_id.in_(accs))
     cats = parse_uuid_list(category_ids)
     if cats:
-        q = q.where(Transaction.category_id.in_(cats))
+        filters.append(Transaction.category_id.in_(cats))
     if payee_id:
         # parse_uuid_list returns a list — single payee_id wrapped works too.
         pids = parse_uuid_list([payee_id])
         if pids:
-            q = q.where(Transaction.payee_id == pids[0])
+            filters.append(Transaction.payee_id == pids[0])
     if currency:
-        q = q.where(Transaction.currency == currency.upper())
+        filters.append(Transaction.currency == currency.upper())
     if description_contains:
-        q = q.where(Transaction.description.ilike(f"%{description_contains}%"))
-    # Status: default to "posted" so totals reflect money that actually
-    # moved. The model can opt into "pending" or "all" when the user
-    # explicitly asks about scheduled/projected amounts.
+        filters.append(Transaction.description.ilike(f"%{description_contains}%"))
     if status == "posted":
-        q = q.where(Transaction.status == "posted")
+        filters.append(Transaction.status == "posted")
     elif status == "pending":
-        q = q.where(Transaction.status == "pending")
-    # status == "all" → no filter
-
-    # Securo convention: type='debit' = expense, type='credit' = income.
-    # Amount sign isn't authoritative because some imports normalize it.
+        filters.append(Transaction.status == "pending")
     if tx_type == "expense":
-        q = q.where(Transaction.type == "debit")
+        filters.append(Transaction.type == "debit")
     elif tx_type == "income":
-        q = q.where(Transaction.type == "credit")
+        filters.append(Transaction.type == "credit")
 
-    if exclude_transfers:
-        q = q.where(Transaction.transfer_pair_id.is_(None))
+    base = select(Transaction.id).join(Account, Account.id == Transaction.account_id).where(*filters)
+    if metric != "count" and not currency:
+        missing_fx = (await session.execute(
+            base.where(
+                Transaction.currency != primary_currency,
+                Transaction.amount_primary.is_(None),
+            ).limit(1)
+        )).first()
+        if missing_fx:
+            return {"error": "missing_fx", "currency": primary_currency}
 
-    q = q.group_by(bucket_id).order_by(value_expr.desc().nulls_last()).limit(int(limit))
+    q = (
+        select(bucket_id.label("bucket"), value_expr.label("value"),
+               func.count(Transaction.id).label("count"))
+        .join(Account, Account.id == Transaction.account_id)
+        .where(*filters)
+        .group_by(bucket_id).order_by(value_expr.desc().nulls_last()).limit(limit)
+    )
 
     rows = (await session.execute(q)).mappings().all()
     label_map: dict[Any, str] = {}
@@ -162,5 +192,8 @@ async def aggregate(
         "from_date": fd.isoformat() if fd else None,
         "to_date": td.isoformat() if td else None,
         "items": items,
+        "currency": None if metric == "count" else (currency.upper() if currency else primary_currency),
+        "basis": "gross_transactions",
+        "transfers_included": not exclude_transfers,
         "total": len(items),
     }

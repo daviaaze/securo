@@ -93,3 +93,13 @@ docker compose exec backend python scripts/seed_perf.py --no-reset
 ## Reproducibility
 
 The script uses a fixed RNG seed (`random.Random(42)`), so the same arguments always produce the same data distribution. The only variable is `--start-date` relative to the current date, which determines the date range.
+
+## Synthetic AI quality check
+
+From `backend/`, with dependencies installed and a local Ollama server running:
+
+```bash
+python scripts/eval_agents_quality.py --ollama-url http://127.0.0.1:11434 --model qwen3.5:9b
+```
+
+The evaluator runs isolated read-only financial cases from `scripts/agents_quality_cases.jsonl` through the real agent executor and Ollama provider. It accepts loopback HTTP only, creates its fixtures in in-memory SQLite, and prints case IDs, pass/fail, elapsed time and an aggregate score; no private conversations, model answers or tool payloads are printed. A failed case exits nonzero. The cases cover BRL balance, monthly expense aggregate and unavailable FX. Compare the same model and cases before and after changes; the score is a smoke signal, not a guarantee for arbitrary conversations. Agent migrations and PostgreSQL/pgvector tests require a separate disposable database.

@@ -6,9 +6,11 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.schemas.conversation import ConversationRead, MessageRead
+from app.agents.models.usage import LlmUsage
 from app.agents.services import agent_service, conversation_service
 from app.core.database import get_async_session
 from app.core.workspace_context import (
@@ -20,6 +22,16 @@ from app.core.workspace_context import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
+
+
+class ConversationUsage(BaseModel):
+    input_tokens: int
+    output_tokens: int
+    chat_calls: int
+    compaction_calls: int
+    avg_latency_ms: float | None
+    estimated_cost_usd: float | None
+    compacted_through_ordinal: int
 
 
 class RenameConversationBody(BaseModel):
@@ -68,6 +80,36 @@ async def list_messages(
     if conv is None:
         raise HTTPException(status_code=404, detail="conversation not found")
     return await conversation_service.list_messages(session, conversation_id, limit=limit)
+
+
+@router.get("/conversations/{conversation_id}/usage", response_model=ConversationUsage)
+async def get_conversation_usage(
+    conversation_id: uuid.UUID,
+    ctx: WorkspaceContext = Depends(current_workspace),
+    session: AsyncSession = Depends(get_async_session),
+):
+    conv = await conversation_service.get_conversation(session, conversation_id, ctx.workspace.id)
+    if conv is None or conv.user_id != ctx.user_id:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    rows = (await session.execute(
+        select(LlmUsage).where(
+            LlmUsage.conversation_id == conversation_id,
+            LlmUsage.user_id == ctx.user_id,
+        )
+    )).scalars().all()
+    latencies = [row.latency_ms for row in rows if row.latency_ms is not None]
+    return ConversationUsage(
+        input_tokens=sum(row.input_tokens for row in rows),
+        output_tokens=sum(row.output_tokens for row in rows),
+        chat_calls=sum(row.kind == "chat" for row in rows),
+        compaction_calls=sum(row.kind == "compaction" for row in rows),
+        avg_latency_ms=sum(latencies) / len(latencies) if latencies else None,
+        estimated_cost_usd=(
+            float(sum(row.cost_usd for row in rows))
+            if all(row.cost_usd is not None for row in rows) else None
+        ),
+        compacted_through_ordinal=conv.summary_through_ordinal or 0,
+    )
 
 
 @router.patch("/conversations/{conversation_id}", response_model=ConversationRead)

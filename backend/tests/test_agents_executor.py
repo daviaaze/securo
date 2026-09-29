@@ -23,11 +23,15 @@ from app.agents.models.conversation import Conversation, Message
 from app.agents.models.usage import LlmUsage
 from app.agents.providers.base import (
     ChatChunk,
+    ChatResponse,
     LLMAuthError,
     LLMProvider,
     Usage,
 )
 from app.agents.runtime.executor import AgentExecutor, ExecutorEvent
+from app.agents.providers.anthropic import _serialize_messages as anthropic_messages
+from app.agents.providers.ollama import _serialize_messages as ollama_messages
+from app.agents.providers.openai import _serialize_messages as openai_messages
 from app.agents.services import conversation_service
 
 
@@ -136,6 +140,23 @@ async def test_simple_text_response_no_tools(session, test_user, test_agent: Age
     assert msgs[1].output_tokens == 4
 
 
+async def test_token_only_model_reply_is_not_a_success(session, test_user, test_agent, test_conversation):
+    provider = _ScriptedProvider([[
+        ChatChunk(type="usage", usage=Usage(input_tokens=20, output_tokens=40)),
+        ChatChunk(type="finish", finish_reason="stop"),
+    ]])
+    with _patch_provider(provider):
+        events = await _drain(
+            AgentExecutor(mcp=_FakeMCP(tools=[])), session=session,
+            agent=test_agent, user_id=test_user.id,
+            conversation_id=test_conversation.id, user_message="What is my balance?",
+        )
+    assert [(event.type, event.error_code) for event in events[-2:]] == [
+        ("error", "empty_response"), ("done", None),
+    ]
+    assert events[-1].finish_reason == "error"
+
+
 async def test_usage_row_recorded(session, test_user, test_agent, test_conversation):
     provider = _ScriptedProvider([[
         ChatChunk(type="text_delta", text="ok"),
@@ -242,6 +263,97 @@ async def test_tool_call_dispatch_and_result_persisted(session, test_user, test_
         )
     restored = [tc for m in provider.requests[2] for tc in m.tool_calls]
     assert restored[0].thought_signature == signature
+
+
+async def test_persisted_text_only_tool_error_replays_canonical_content(
+    session, test_user, test_agent, test_conversation
+):
+    tools = [ToolHandle(server="securo", name="list_accounts", description="d", parameters={"type": "object"})]
+    provider = _ScriptedProvider([
+        [
+            ChatChunk(type="tool_call_start", tool_call_id="failed-1", tool_name="securo__list_accounts"),
+            ChatChunk(type="tool_call_args_delta", tool_call_id="failed-1", args_delta="{}"),
+            ChatChunk(type="tool_call_end", tool_call_id="failed-1"),
+            ChatChunk(type="finish", finish_reason="tool_calls"),
+        ],
+        [ChatChunk(type="text_delta", text="Unavailable"), ChatChunk(type="finish", finish_reason="stop")],
+        [ChatChunk(type="text_delta", text="Still unavailable"), ChatChunk(type="finish", finish_reason="stop")],
+    ])
+    executor = AgentExecutor(mcp=_FakeMCP(
+        tools=tools, canned_result={"ok": False, "data": None, "text": "Tool error: offline"},
+    ))
+    with _patch_provider(provider):
+        await _drain(
+            executor, session=session, agent=test_agent, user_id=test_user.id,
+            conversation_id=test_conversation.id, user_message="Check accounts",
+        )
+    stored = (await session.execute(
+        select(Message).where(
+            Message.conversation_id == test_conversation.id, Message.role == "tool",
+        )
+    )).scalar_one()
+    assert stored.content == '"Tool error: offline"'
+
+    with _patch_provider(provider):
+        await _drain(
+            executor, session=session, agent=test_agent, user_id=test_user.id,
+            conversation_id=test_conversation.id, user_message="What happened?",
+        )
+    replayed = [m for m in provider.requests[-1] if m.role == "tool"]
+    assert len(replayed) == 1
+    assert replayed[0].content == stored.content
+    assert replayed[0].tool_call_id == "failed-1"
+    assert replayed[0].name == "securo__list_accounts"
+
+
+async def test_parallel_replay_serializes_across_providers(
+    session, test_user, test_agent, test_conversation
+):
+    tools = [ToolHandle(server="securo", name="list_accounts", description="d", parameters={"type": "object"})]
+    provider = _ScriptedProvider([[
+        ChatChunk(type="tool_call_start", tool_call_id="one", tool_name="securo__list_accounts"),
+        ChatChunk(type="tool_call_args_delta", tool_call_id="one", args_delta="{}"),
+        ChatChunk(type="tool_call_end", tool_call_id="one", thought_signature="gemini-signature"),
+        ChatChunk(type="tool_call_start", tool_call_id="two", tool_name="securo__list_accounts"),
+        ChatChunk(type="tool_call_args_delta", tool_call_id="two", args_delta="{}"),
+        ChatChunk(type="tool_call_end", tool_call_id="two"),
+        ChatChunk(type="finish", finish_reason="tool_calls"),
+    ], [
+        ChatChunk(type="text_delta", text="Two results"),
+        ChatChunk(type="finish", finish_reason="stop"),
+    ], [
+        ChatChunk(type="text_delta", text="Still two results"),
+        ChatChunk(type="finish", finish_reason="stop"),
+    ]])
+    executor = AgentExecutor(mcp=_FakeMCP(
+        tools=tools, canned_result={"ok": True, "data": {"balance": 135}, "text": "preview"},
+    ))
+    with _patch_provider(provider):
+        await _drain(
+            executor, session=session, agent=test_agent, user_id=test_user.id,
+            conversation_id=test_conversation.id, user_message="Check twice",
+        )
+        await _drain(
+            executor, session=session, agent=test_agent, user_id=test_user.id,
+            conversation_id=test_conversation.id, user_message="And again?",
+        )
+    history = provider.requests[-1]
+    assistant = next(m for m in history if m.tool_calls)
+    results = [m for m in history if m.role == "tool"]
+    assert [m.tool_call_id for m in results] == ["one", "two"]
+    assert [m.name for m in results] == ["securo__list_accounts"] * 2
+    assert [m.content for m in results] == ['{"balance": 135}'] * 2
+    assert assistant.tool_calls[0].thought_signature == "gemini-signature"
+
+    ollama = ollama_messages(history)
+    assert [m["name"] for m in ollama if m["role"] == "tool"] == [m.name for m in results]
+    openai = openai_messages(history)
+    assert [m["tool_call_id"] for m in openai if m["role"] == "tool"] == ["one", "two"]
+    call = next(m for m in openai if m.get("tool_calls"))
+    assert call["tool_calls"][0]["extra_content"]["google"]["thought_signature"] == "gemini-signature"
+    anthropic = anthropic_messages(history)
+    assert [m["content"][0]["tool_use_id"] for m in anthropic if isinstance(m["content"], list)
+            and m["content"][0]["type"] == "tool_result"] == ["one", "two"]
 
 
 async def test_provider_auth_error_surfaced_as_friendly_message(
@@ -556,13 +668,10 @@ async def test_max_iterations_terminates_runaway_agent(session, test_user, test_
     assert done is not None and done.finish_reason == "max_iterations"
 
 
-async def test_history_window_never_opens_on_an_orphaned_tool_result(
+async def test_parallel_exchange_is_never_replayed_without_its_results(
     session, test_user, test_agent, test_conversation,
 ):
-    """A turn with parallel tool calls has an odd number of rows, so the
-    history window can start on a tool result whose assistant call was cut
-    off. Providers reject that, so the replay must start at a user message."""
-    test_agent.max_history_messages = 3  # window of 3 * 2 + 2 = 8 rows
+    test_agent.max_history_messages = 3
     await session.commit()
 
     async def add(role, content="", **kw):
@@ -570,35 +679,172 @@ async def test_history_window_never_opens_on_an_orphaned_tool_result(
             session, conversation_id=test_conversation.id, role=role, content=content, **kw,
         )
 
-    await add("user", "q0")
+    await add("user", "old question")
     await add("assistant", tool_calls=[
         {"id": "c1", "name": "securo__list_accounts", "arguments": {}},
         {"id": "c2", "name": "securo__list_budgets", "arguments": {}},
     ])
     await add("tool", "{}", tool_result={"tool_call_id": "c1"})
     await add("tool", "{}", tool_result={"tool_call_id": "c2"})
-    await add("assistant", "a0")
-    for i in (1, 2):
-        await add("user", f"q{i}")
-        await add("assistant", f"a{i}")
+    await add("assistant", "old answer")
+    await add("user", "recent question")
+    await add("assistant", "recent answer")
+    provider = _ScriptedProvider([
+        [ChatChunk(type="text_delta", text="stable intent"),
+         ChatChunk(type="finish", finish_reason="stop")],
+        [ChatChunk(type="text_delta", text="new answer"),
+         ChatChunk(type="finish", finish_reason="stop")],
+    ])
+    with _patch_provider(provider):
+        await _drain(
+            AgentExecutor(mcp=_FakeMCP(tools=[])),
+            session=session, agent=test_agent, user_id=test_user.id,
+            conversation_id=test_conversation.id, user_message="new question",
+        )
+    replayed = provider.requests[-1]
+    assert replayed[-1].content == "new question"
+    assert any(m.role == "user" and "stable intent" in (m.content or "") for m in replayed)
+    assert all(m.tool_call_id is None for m in replayed)
+    assert any(m.content == "recent answer" for m in replayed)
+    assert not any(m.content == "old answer" for m in replayed)
 
-    provider = _ScriptedProvider([[
-        ChatChunk(type="text_delta", text="ok"),
+
+async def test_long_thread_compacts_prose_without_tool_data(
+    session, test_user, test_agent, test_conversation,
+):
+    class SummarizingProvider(_ScriptedProvider):
+        def __init__(self):
+            super().__init__([[
+                ChatChunk(type="text_delta", text="The current answer"),
+                ChatChunk(type="finish", finish_reason="stop"),
+            ]])
+            self.compaction_inputs = []
+
+        async def chat(self, messages, **kwargs):
+            self.compaction_inputs.append(deepcopy(messages))
+            assert kwargs["tools"] is None
+            assert kwargs["temperature"] == 0
+            return ChatResponse(content="Prefers brief replies", usage=Usage(30, 10))
+
+    async def add(role, content=None, **kwargs):
+        await conversation_service.append_message(
+            session, conversation_id=test_conversation.id, role=role, content=content, **kwargs,
+        )
+    await add("user", "initial")
+    await add("assistant", tool_calls=[{"id": "a", "name": "lookup", "arguments": {}}])
+    await add("tool", "SENSITIVE_TOOL_ONLY_81927", tool_result={"tool_call_id": "a", "name": "lookup"})
+    await add("assistant", "Need a current read next time")
+    for index in range(25):
+        await add("user", f"topic {index}")
+        await add("assistant", f"reply {index}")
+    test_agent.max_history_messages = 5
+    await session.commit()
+    before = len(await conversation_service.uncheckpointed_messages(session, test_conversation.id))
+    provider = SummarizingProvider()
+    with _patch_provider(provider):
+        events = await _drain(
+            AgentExecutor(mcp=_FakeMCP(tools=[])), session=session, agent=test_agent,
+            user_id=test_user.id, conversation_id=test_conversation.id, user_message="live question",
+        )
+    assert events[-1].finish_reason == "stop"
+    assert len(provider.compaction_inputs) <= 2
+    assert len(provider.compaction_inputs) >= 1
+    assert all("SENSITIVE_TOOL_ONLY_81927" not in (m.content or "")
+               for request in provider.compaction_inputs for m in request)
+    assert all(m.role != "system" or "Prefers brief replies" not in (m.content or "")
+               for m in provider.requests[0])
+    assert any(m.role == "user" and "Prefers brief replies" in (m.content or "")
+               for m in provider.requests[0])
+    assert provider.requests[0][-1].content == "live question"
+    await session.refresh(test_conversation)
+    assert test_conversation.summary_through_ordinal
+    assert len((await session.execute(select(Message).where(
+        Message.conversation_id == test_conversation.id,
+    ))).scalars().all()) == before + 2
+    usage = (await session.execute(select(LlmUsage).where(
+        LlmUsage.conversation_id == test_conversation.id,
+    ))).scalars().all()
+    assert [row.kind for row in usage].count("compaction") == len(provider.compaction_inputs)
+
+
+async def test_failed_compaction_omits_old_turns_without_checkpoint(
+    session, test_user, test_agent, test_conversation,
+):
+    class EmptySummaryProvider(_ScriptedProvider):
+        async def chat(self, messages, **kwargs):
+            return ChatResponse(content="")
+
+    for index in range(4):
+        await conversation_service.append_message(
+            session, conversation_id=test_conversation.id, role="user", content=f"q{index}",
+        )
+        await conversation_service.append_message(
+            session, conversation_id=test_conversation.id, role="assistant", content=f"a{index}",
+        )
+    test_agent.max_history_messages = 3
+    await session.commit()
+    provider = EmptySummaryProvider([[
+        ChatChunk(type="text_delta", text="Live answer"),
         ChatChunk(type="finish", finish_reason="stop"),
     ]])
     with _patch_provider(provider):
         await _drain(
-            AgentExecutor(mcp=_FakeMCP(tools=[])),
-            session=session,
-            agent=test_agent,
-            user_id=test_user.id,
-            conversation_id=test_conversation.id,
-            user_message="new question",
+            AgentExecutor(mcp=_FakeMCP(tools=[])), session=session, agent=test_agent,
+            user_id=test_user.id, conversation_id=test_conversation.id, user_message="live",
         )
+    assert provider.requests[0][-1].content == "live"
+    assert any("context omitted" in (m.content or "") for m in provider.requests[0])
+    await session.refresh(test_conversation)
+    assert test_conversation.summary_through_ordinal is None
 
-    replayed = [m for m in provider.requests[0] if m.role != "system"]
-    assert [(m.role, m.content) for m in replayed] == [
-        ("user", "q1"), ("assistant", "a1"),
-        ("user", "q2"), ("assistant", "a2"),
-        ("user", "new question"),
+
+async def test_parallel_oversized_results_are_replaced_as_one_batch(
+    session, test_user, test_agent, test_conversation, monkeypatch,
+):
+    tools = [ToolHandle(server="securo", name="lookup", description="d", parameters={"type": "object"})]
+    provider = _ScriptedProvider([[
+        ChatChunk(type="tool_call_start", tool_call_id="a", tool_name="securo__lookup"),
+        ChatChunk(type="tool_call_args_delta", tool_call_id="a", args_delta="{}"),
+        ChatChunk(type="tool_call_end", tool_call_id="a"),
+        ChatChunk(type="tool_call_start", tool_call_id="b", tool_name="securo__lookup"),
+        ChatChunk(type="tool_call_args_delta", tool_call_id="b", args_delta="{}"),
+        ChatChunk(type="tool_call_end", tool_call_id="b"),
+        ChatChunk(type="finish", finish_reason="tool_calls"),
+    ], [
+        ChatChunk(type="text_delta", text="Narrow the query"),
+        ChatChunk(type="finish", finish_reason="stop"),
+    ]])
+    executor = AgentExecutor(mcp=_FakeMCP(
+        tools=tools, canned_result={"ok": True, "data": {"items": ["9" * 60000]}},
+    ))
+    monkeypatch.setattr(executor.settings, "request_budget_bytes", 16000)
+    with _patch_provider(provider):
+        events = await _drain(
+            executor, session=session, agent=test_agent, user_id=test_user.id,
+            conversation_id=test_conversation.id, user_message="lookup both",
+        )
+    assert events[-1].finish_reason == "stop"
+    saved = (await session.execute(select(Message).where(
+        Message.conversation_id == test_conversation.id, Message.role == "tool",
+    ))).scalars().all()
+    assert len(saved) == 2
+    assert all("tool_result_too_large" in m.content for m in saved)
+    assert all("9" * 100 not in m.content for m in saved)
+    assert [m.tool_call_id for m in provider.requests[1] if m.role == "tool"] == ["a", "b"]
+
+
+async def test_irreducible_prompt_returns_context_error_before_model_call(
+    session, test_user, test_agent, test_conversation, monkeypatch,
+):
+    provider = _ScriptedProvider([])
+    executor = AgentExecutor(mcp=_FakeMCP(tools=[]))
+    monkeypatch.setattr(executor.settings, "request_budget_bytes", 8000)
+    with _patch_provider(provider):
+        events = await _drain(
+            executor, session=session, agent=test_agent, user_id=test_user.id,
+            conversation_id=test_conversation.id, user_message="x" * 60000,
+        )
+    assert [(e.type, e.error_code) for e in events] == [
+        ("error", "context_too_large"), ("done", None),
     ]
+    assert provider.requests == []

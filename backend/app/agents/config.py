@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from pydantic import Field
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -44,6 +45,9 @@ class AgentSettings(BaseSettings):
     # Default RAG parameters (overridable per agent in the DB row).
     default_top_n: int = 6
     default_similarity_threshold: float = 0.25
+
+    history_budget_bytes: int = Field(default=24576, gt=0)
+    request_budget_bytes: int = Field(default=49152, gt=0)
 
     # Embedding provider/model. Both MCP-server and Celery worker honor
     # these. Switching requires re-embedding existing docs (their
