@@ -679,8 +679,14 @@ class AgentExecutor:
                     args = json.loads(tc["args_buf"]) if tc["args_buf"] else {}
                 except json.JSONDecodeError:
                     args = {"_raw": tc["args_buf"]}
+                # Keep the tool-call/result names aligned with the advertised schema.
+                name = tc["name"]
+                if not any(tool.name == name for tool in tool_defs):
+                    matches = [tool.name for tool in tool_defs if tool.name.endswith(f"__{name}")]
+                    if len(matches) == 1:
+                        name = matches[0]
                 assembled_calls.append(ToolCall(
-                    id=tc["id"], name=tc["name"], arguments=args,
+                    id=tc["id"], name=name, arguments=args,
                     thought_signature=tc.get("thought_signature"),
                 ))
 

@@ -184,9 +184,9 @@ async def test_usage_row_recorded(session, test_user, test_agent, test_conversat
     assert rows[0].cost_usd is not None
     assert float(rows[0].cost_usd) > 0
 
-
 @pytest.mark.parametrize("signature", [None, "opaque-signature+/=="])
-async def test_tool_call_dispatch_and_result_persisted(session, test_user, test_agent, test_conversation, signature):
+@pytest.mark.parametrize("emitted_name", ["securo__list_accounts", "list_accounts"])
+async def test_tool_call_dispatch_and_result_persisted(session, test_user, test_agent, test_conversation, signature, emitted_name):
     """LLM emits a tool call; executor runs it via fake MCP and feeds the
     result back; second turn returns a plain answer."""
     tools = [ToolHandle(server="securo", name="list_accounts", description="d", parameters={"type": "object"})]
@@ -197,7 +197,7 @@ async def test_tool_call_dispatch_and_result_persisted(session, test_user, test_
     provider = _ScriptedProvider([
         # Turn 1: emit a tool call.
         [
-            ChatChunk(type="tool_call_start", tool_call_id="t1", tool_name="securo__list_accounts"),
+            ChatChunk(type="tool_call_start", tool_call_id="t1", tool_name=emitted_name),
             ChatChunk(type="tool_call_args_delta", tool_call_id="t1", args_delta="{}"),
             ChatChunk(type="tool_call_end", tool_call_id="t1", thought_signature=signature),
             ChatChunk(type="usage", usage=Usage(input_tokens=20, output_tokens=5)),
